@@ -3,45 +3,54 @@ export default {
     const url = new URL(request.url);
     const basePath = "/macvg";
 
-    // 1. Redirect actual root visits to the main page
+    // 1. Redirect root "/" to "/macvg/"
     if (url.pathname === "/" || url.pathname === "") {
       return Response.redirect(`${url.origin}${basePath}/`, 301);
     }
 
-    // 2. THE FIX: Rewrite requests starting with / to look in /macvg/
-    // If the browser asks for "/games.css", we change it to "/macvg/games.css"
-    // but only if it doesn't already start with /macvg
-    let internalPath = url.pathname;
-    if (!internalPath.startsWith(basePath)) {
-      internalPath = `${basePath}${internalPath}`;
+    // 2. SMART ROUTING
+    // We create a list of paths to try. 
+    // First, try exactly what the browser asked for.
+    // Second, if the browser asked for the root, try the /macvg/ subfolder.
+    let pathsToTry = [url.pathname];
+    
+    if (!url.pathname.startsWith(basePath)) {
+      pathsToTry.push(`${basePath}${url.pathname}`);
     }
 
-    // Create a new URL for the internal asset fetch
-    const assetUrl = new URL(url.toString());
-    assetUrl.pathname = internalPath;
+    let response;
+    for (const path of pathsToTry) {
+      const assetUrl = new URL(url.toString());
+      assetUrl.pathname = path;
+      response = await env.ASSETS.fetch(new Request(assetUrl, request));
+      
+      if (response.status !== 404) break; 
+    }
 
-    // 3. Fetch from your Worker's bundled assets
-    let response = await env.ASSETS.fetch(new Request(assetUrl, request));
-
-    // 4. Handle HTML and Inject <base> 
-    // This tells the browser "all your relative links belong to /macvg/"
+    // 3. HTML REWRITING
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/html")) {
       response = new HTMLRewriter()
         .on("head", {
           element(element) {
+            // We inject the <base> tag but we use the actual domain root
+            // to ensure absolute / paths and relative paths both resolve.
             element.prepend(`<base href="${basePath}/">`, { html: true });
           },
         })
         .transform(response);
     }
 
-    // 5. Apply Game-Required Headers
+    // 4. ESSENTIAL HEADERS (The "Game Fixer" Headers)
     const headers = new Headers(response.headers);
     headers.set("Access-Control-Allow-Origin", "*");
-    // Critical for heavy browser games
+    
+    // These allow the high-performance JS engines in MacVG to work
     headers.set("Cross-Origin-Opener-Policy", "same-origin");
     headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+
+    // Remove any security headers that might block scripts from loading
+    headers.delete("Content-Security-Policy");
 
     return new Response(response.body, {
       status: response.status,
