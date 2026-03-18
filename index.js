@@ -3,49 +3,63 @@ export default {
     const url = new URL(request.url);
     const basePath = "/macvg";
 
-    // 1. Force the user into the /macvg/ subfolder
+    // 1. Force Root to /macvg/
     if (url.pathname === "/" || url.pathname === "") {
       return Response.redirect(`${url.origin}${basePath}/`, 301);
     }
 
-    // 2. PATH MAPPING
-    // If the browser asks for "/macvg/style.css", 
-    // we need to look for "/style.css" in your GitHub repo files.
-    let targetPath = url.pathname;
-    if (targetPath.startsWith(basePath)) {
-      targetPath = targetPath.replace(basePath, "");
+    // 2. THE PATH STRIPPER
+    // If browser asks for /macvg/games.css OR /games.css,
+    // we look for /games.css in your repo root.
+    let resourcePath = url.pathname;
+    if (resourcePath.startsWith(basePath)) {
+      resourcePath = resourcePath.replace(basePath, "");
     }
-    
-    // If the path becomes empty after removing /macvg, default to index.html
-    if (targetPath === "/" || targetPath === "") {
-      targetPath = "/index.html";
+    if (resourcePath === "/" || resourcePath === "") {
+      resourcePath = "/index.html";
     }
 
-    // 3. FETCH FROM ASSETS
-    // We create a new request pointing to the root of your repo's build
+    // 3. FETCH THE ASSET
     const assetUrl = new URL(url.toString());
-    assetUrl.pathname = targetPath;
+    assetUrl.pathname = resourcePath;
     
     let response = await env.ASSETS.fetch(new Request(assetUrl, request));
 
-    // 4. HTML REWRITER (Fixes internal links)
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("text/html")) {
-      return new HTMLRewriter()
-        .on("head", {
-          element(element) {
-            // This is the "glue" that keeps the app running in a subfolder
-            element.prepend(`<base href="${basePath}/">`, { html: true });
-          },
-        })
-        .transform(response);
+    // 4. THE CONTENT FIXER
+    if (response.status === 200) {
+      const contentType = response.headers.get("content-type") || "";
+      
+      if (contentType.includes("text/html")) {
+        // Rewrite the HTML to fix those 404s
+        return new HTMLRewriter()
+          .on("head", {
+            element(element) {
+              // This fixes the 'app.js' and 'games.css' 404s
+              element.prepend(`<base href="${basePath}/">`, { html: true });
+            },
+          })
+          .on("img", {
+            element(element) {
+              // Fixes logos that might have leading slashes
+              const src = element.getAttribute("src");
+              if (src && src.startsWith("/")) {
+                element.setAttribute("src", `${basePath}${src}`);
+              }
+            }
+          })
+          .transform(response);
+      }
     }
 
-    // 5. HEADERS FOR GAMES
+    // 5. SECURITY & GAME HEADERS (Fixes "ReferenceError" and 403-like blocks)
     const newHeaders = new Headers(response.headers);
     newHeaders.set("Access-Control-Allow-Origin", "*");
     newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
     newHeaders.set("Cross-Origin-Embedder-Policy", "require-corp");
+    
+    // Some ad-blockers or security settings cause 403s on scripts. 
+    // This helps bypass some of those domain-based blocks.
+    newHeaders.delete("X-Frame-Options"); 
 
     return new Response(response.body, {
       status: response.status,
