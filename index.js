@@ -1,50 +1,51 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    
-    // 1. Try the request exactly as the browser asked
-    let response = await env.ASSETS.fetch(request.clone());
+    const basePath = "/macvg";
 
-    // 2. THE FIX: If 404, try to find the file name at the ROOT
-    // Example: if browser asks for /macvg/app.js and it's not there,
-    // this will try to find just /app.js
-    if (response.status === 404) {
-      const parts = url.pathname.split('/');
-      const fileName = parts[parts.length - 1]; // Get just "app.js"
-      
-      if (fileName && fileName.includes('.')) {
-        const rootUrl = new URL(`/${fileName}`, url.origin);
-        const secondAttempt = await env.ASSETS.fetch(new Request(rootUrl, request));
-        
-        if (secondAttempt.ok) {
-          response = secondAttempt;
-        }
-      }
+    // 1. Redirect actual root visits to the main page
+    if (url.pathname === "/" || url.pathname === "") {
+      return Response.redirect(`${url.origin}${basePath}/`, 301);
     }
 
-    // 3. Handle the HTML specifically
+    // 2. THE FIX: Rewrite requests starting with / to look in /macvg/
+    // If the browser asks for "/games.css", we change it to "/macvg/games.css"
+    // but only if it doesn't already start with /macvg
+    let internalPath = url.pathname;
+    if (!internalPath.startsWith(basePath)) {
+      internalPath = `${basePath}${internalPath}`;
+    }
+
+    // Create a new URL for the internal asset fetch
+    const assetUrl = new URL(url.toString());
+    assetUrl.pathname = internalPath;
+
+    // 3. Fetch from your Worker's bundled assets
+    let response = await env.ASSETS.fetch(new Request(assetUrl, request));
+
+    // 4. Handle HTML and Inject <base> 
+    // This tells the browser "all your relative links belong to /macvg/"
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/html")) {
-      return new HTMLRewriter()
+      response = new HTMLRewriter()
         .on("head", {
           element(element) {
-            // Remove any existing <base> tags that might be causing issues
-            // and inject a neutral one.
-            element.append(`<base href="/">`, { html: true });
+            element.prepend(`<base href="${basePath}/">`, { html: true });
           },
         })
         .transform(response);
     }
 
-    // 4. Critical headers for Game Engines
+    // 5. Apply Game-Required Headers
     const headers = new Headers(response.headers);
     headers.set("Access-Control-Allow-Origin", "*");
+    // Critical for heavy browser games
     headers.set("Cross-Origin-Opener-Policy", "same-origin");
     headers.set("Cross-Origin-Embedder-Policy", "require-corp");
 
     return new Response(response.body, {
       status: response.status,
-      headers: headers
+      headers: headers,
     });
   },
 };
